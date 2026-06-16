@@ -63,6 +63,7 @@ class FeatureEngineer:
     ) -> pd.DataFrame:
 
         df = listings.copy()
+        df = enrich_with_detailed_columns(df)
 
         df = self._clean_core(df)
         df = self._host_features(df)
@@ -213,10 +214,20 @@ class FeatureEngineer:
         df["log_dist_downtown"]   = np.log1p(df["dist_downtown_la_km"])
 
         # Geographic clusters via K-Means (spatial market segmentation)
-        coords = df[["latitude", "longitude"]].fillna(df[["latitude","longitude"]].mean())
+        coords = df[["latitude", "longitude"]].fillna(df[["latitude", "longitude"]].mean())
+
+        if len(coords) == 0:
+            raise ValueError(
+                "DataFrame is empty before KMeans geo-clustering. "
+                "This usually means all rows were dropped during price filtering. "
+                "Check that your listings.csv contains a 'price' column with valid values. "
+                "The detailed listings.csv.gz (not the summary listings.csv) is required."
+            )
+
+        n_clusters = min(self.n_geo_clusters, len(coords))
         if self._geo_kmeans is None:
             self._geo_kmeans = KMeans(
-                n_clusters=self.n_geo_clusters, random_state=42, n_init=10
+                n_clusters=n_clusters, random_state=42, n_init=10
             )
             self._geo_kmeans.fit(coords)
 
@@ -294,3 +305,140 @@ class FeatureEngineer:
         df["host_listings_x_avail"] = df["log_host_listings"] * df["availability_rate"]
         df["downtown_x_room"] = df["log_dist_downtown"] * df["room_type_ord"]
         return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Extra features unlocked by the detailed listings file
+# ══════════════════════════════════════════════════════════════════════════════
+def enrich_with_detailed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Called inside FeatureEngineer.transform() when detailed columns exist.
+    Safe to call on summary-only data — all ops are guarded by column checks.
+    """
+
+    # ── Capacity & physical attributes ───────────────────────────────
+    if "accommodates" in df.columns:
+        df["accommodates"] = pd.to_numeric(df["accommodates"], errors="coerce").fillna(1)
+        df["log_accommodates"] = np.log1p(df["accommodates"])
+
+    if "bedrooms" in df.columns:
+        df["bedrooms"] = pd.to_numeric(df["bedrooms"], errors="coerce").fillna(1)
+
+    if "beds" in df.columns:
+        df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(1)
+        df["beds_per_person"] = df["beds"] / df.get("accommodates", pd.Series(1, index=df.index)).clip(lower=1)
+
+    if "bathrooms" in df.columns:
+        df["bathrooms"] = pd.to_numeric(df["bathrooms"], errors="coerce").fillna(1)
+    elif "bathrooms_text" in df.columns:
+        # e.g. "1 shared bath", "1.5 baths" → extract numeric
+        df["bathrooms"] = (
+            df["bathrooms_text"]
+            .astype(str)
+            .str.extract(r"(\d+\.?\d*)")[0]
+            .astype(float)
+            .fillna(1)
+        )
+        df["is_shared_bath"] = df["bathrooms_text"].str.lower().str.contains("shared").astype(int)
+
+    if "property_type" in df.columns:
+        # broad buckets: entire_home, private_room, hotel, shared
+        df["is_entire_home_prop"] = df["property_type"].str.lower().str.contains("entire").astype(int)
+        df["is_hotel_prop"] = df["property_type"].str.lower().str.contains("hotel|boutique").astype(int)
+        df["is_guest_suite"] = df["property_type"].str.lower().str.contains("guest suite|guesthouse").astype(int)
+
+    # ── Host quality signals ──────────────────────────────────────────
+    if "host_is_superhost" in df.columns:
+        df["host_is_superhost_flag"] = (df["host_is_superhost"].astype(str).str.lower() == "t").astype(int)
+
+    if "host_identity_verified" in df.columns:
+        df["host_verified"] = (df["host_identity_verified"].astype(str).str.lower() == "t").astype(int)
+
+    if "host_response_rate" in df.columns:
+        df["host_response_rate_num"] = (
+            df["host_response_rate"]
+            .astype(str).str.replace("%", "").str.strip()
+            .replace({"N/A": np.nan, "nan": np.nan})
+            .astype(float) / 100
+        )
+
+    if "host_acceptance_rate" in df.columns:
+        df["host_acceptance_rate_num"] = (
+            df["host_acceptance_rate"]
+            .astype(str).str.replace("%", "").str.strip()
+            .replace({"N/A": np.nan, "nan": np.nan})
+            .astype(float) / 100
+        )
+
+    if "hosts_time_as_host_years" in df.columns:
+        df["host_experience_years"] = pd.to_numeric(df["hosts_time_as_host_years"], errors="coerce").fillna(0)
+
+    # ── Review scores (6 dimensions) ─────────────────────────────────
+    score_cols = [
+        "review_scores_rating", "review_scores_accuracy",
+        "review_scores_cleanliness", "review_scores_checkin",
+        "review_scores_communication", "review_scores_location",
+        "review_scores_value",
+    ]
+    present_scores = [c for c in score_cols if c in df.columns]
+    for col in present_scores:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if present_scores:
+        df["avg_review_score"] = df[present_scores].mean(axis=1)
+        df["min_review_score"] = df[present_scores].min(axis=1)
+        df["review_score_spread"] = df[present_scores].max(axis=1) - df[present_scores].min(axis=1)
+        # location score relative to overall (premium location signal)
+        if "review_scores_location" in df.columns and "review_scores_rating" in df.columns:
+            df["location_vs_overall"] = df["review_scores_location"] - df["review_scores_rating"]
+
+    # ── Booking / calendar signals ────────────────────────────────────
+    if "instant_bookable" in df.columns:
+        df["instant_bookable_flag"] = (df["instant_bookable"].astype(str).str.lower() == "t").astype(int)
+
+    if "has_availability" in df.columns:
+        df["has_availability_flag"] = (df["has_availability"].astype(str).str.lower() == "t").astype(int)
+
+    if "availability_30" in df.columns:
+        df["avail_30_rate"] = pd.to_numeric(df["availability_30"], errors="coerce") / 30
+    if "availability_60" in df.columns:
+        df["avail_60_rate"] = pd.to_numeric(df["availability_60"], errors="coerce") / 60
+    if "availability_90" in df.columns:
+        df["avail_90_rate"] = pd.to_numeric(df["availability_90"], errors="coerce") / 90
+
+    # ── Amenity features ─────────────────────────────────────────────
+    if "amenities" in df.columns:
+        amen = df["amenities"].astype(str).str.lower()
+        df["has_pool"]        = amen.str.contains("pool").astype(int)
+        df["has_hot_tub"]     = amen.str.contains("hot tub|jacuzzi").astype(int)
+        df["has_gym"]         = amen.str.contains("gym|exercise equipment").astype(int)
+        df["has_ev_charger"]  = amen.str.contains("ev charger").astype(int)
+        df["has_beach_access"]= amen.str.contains("beach access|beachfront").astype(int)
+        df["has_fireplace"]   = amen.str.contains("fireplace").astype(int)
+        df["has_workspace"]   = amen.str.contains("dedicated workspace").astype(int)
+        df["has_ac"]          = amen.str.contains("air conditioning").astype(int)
+        df["has_washer"]      = amen.str.contains(r"\bwasher\b").astype(int)
+        df["has_parking"]     = amen.str.contains("parking").astype(int)
+        df["has_pets_allowed"]= amen.str.contains("pets allowed").astype(int)
+        df["has_breakfast"]   = amen.str.contains("breakfast").astype(int)
+        df["has_self_checkin"]= amen.str.contains("self check-in|lockbox|keypad").astype(int)
+        # amenity count as a richness proxy
+        df["amenity_count"] = (
+            df["amenities"].astype(str)
+            .str.count('","')
+            .add(1)
+            .clip(upper=100)
+        )
+
+    # ── Estimated revenue (additional target signal, useful as feature) ──
+    if "estimated_revenue_l365d" in df.columns:
+        df["log_estimated_revenue"] = np.log1p(
+            pd.to_numeric(df["estimated_revenue_l365d"], errors="coerce").fillna(0)
+        )
+
+    if "estimated_occupancy_l365d" in df.columns:
+        df["occupancy_rate"] = (
+            pd.to_numeric(df["estimated_occupancy_l365d"], errors="coerce").fillna(0) / 365
+        ).clip(0, 1)
+
+    return df
