@@ -220,23 +220,4 @@ class DataLoader:
 
     @staticmethod
     def _no_price_message() -> str:
-        return """
-╔══════════════════════════════════════════════════════════════╗
-║  PRICE DATA MISSING — model cannot be trained                ║
-╠══════════════════════════════════════════════════════════════╣
-║  All price columns in listings.csv and calendar.csv are      ║
-║  blank. This is a known issue with some Inside Airbnb        ║
-║  scrapes where prices are stripped before publishing.        ║
-║                                                              ║
-║  SOLUTION — run the price scraper first:                     ║
-║                                                              ║
-║    python -m src.price_scraper \\                            ║
-║        --input  data/listings.csv \\                         ║
-║        --output data/prices.csv \\                           ║
-║        --max    5000                                         ║
-║                                                              ║
-║  This fetches live nightly prices from Airbnb's API          ║
-║  for up to 5000 listings (~2-3 hours with polite delays).    ║
-║  Then re-run pipeline.py — prices.csv is picked up auto.     ║
-╚══════════════════════════════════════════════════════════════╝
-"""
+        return None
