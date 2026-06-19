@@ -1,28 +1,4 @@
-# Core ML
-numpy>=1.24
-pandas>=2.0
-scikit-learn>=1.3
-xgboost>=2.0
-lightgbm>=4.0
-
-# Hyperparameter tuning (optional)
-optuna>=3.4
-
-# Explainability
-shap>=0.44
-
-# Geo
-# shapely>=2.0      # optional: for polygon-based geo features
-
-# Visualization
-matplotlib>=3.7
-seaborn>=0.13
-
-# Utilities
-joblib>=1.3
-selenium 
-webdriver-manager
-undetected-chromedriver
-
-requests 
-beautifulsoup4
+groq
+chromadb
+sentence-transformers
+torch
